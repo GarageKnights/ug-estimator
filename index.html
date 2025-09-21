@@ -1,0 +1,770 @@
+function estimate(){
+    const ins={
+      amps:num(v('service_amperes')?.value)||200,
+      volts:num(v('service_voltage')?.value)||240,
+      L:num(v('trench_length_ft')?.value)||100,
+      depth:num(v('burial_depth_in')?.value)||30,
+      soil:(v('soil_condition')?.value||"normal"),
+      sweeps:num(v('num_sweeps')?.value)||2,
+      lbs:num(v('num_lb_fittings')?.value)||1,
+      cross:num(v('asphalt_crossing_ft')?.value)||0,
+      I:num(v('diversified_load_amps')?.value)||100,
+      applyRC:!!v('apply_rc')?.checked,
+      sqft:num(v('home_sqft')?.value)||0,
+      heat:(v('heating_type')?.value)||'aohp',
+      rcBasis:(v('p_rc_basis')?.value)||COSTS.revenue_credit.basis,
+      rcMonths:num(v('p_rc_months')?.value)||COSTS.revenue_credit.months,
+      rcRate:num(v('p_rc_rate')?.value)||COSTS.revenue_credit.rate_per_unit,
+      override:(v('main_size_override')?.value||"AUTO"),
+      method:(v('install_method')?.value||'direct_bury_conduit'),
+      pedestal:(v('pedestal_option')?.value||'nr'),
+      pole:(v('pole_option')?.value||'nr'),
+      primary_req: !!v('primary_required')?.checked,
+      primary_method: (v('primary_install_method')?.value||''),
+      primary_len: num(v('primary_trench_length_ft')?.value)||0,
+      primary_ug_xfmr: (v('primary_ug_xfmr')?.value||'na'),
+      primary_oh_xfmr: (v('primary_oh_xfmr')?.value||'na'),
+      checkVD: !!v('do_voltage_drop_check')?.checked,
+      enforceVD: !!v('enforce_vd')?.checked
+    };
+    const mats=COSTS.materials, lab=COSTS.labor, tr=COSTS.trenching, acc=COSTS.accessories, soft=COSTS.soft_costs;
+    const sFactor = tr.soil_factor[ins.soil]||1;
+
+    const pick=choose({I:Math.min(ins.I,ins.amps),V:ins.volts,L:ins.L,override:ins.override,checkVD:ins.checkVD,enforce:ins.enforceVD});
+    const main=pick.size; const vdrop=pick.vd; const forced=!!pick.forced;
+
+    let note;
+    if(forced){
+      note = `Forced to AL ${main} · ~${(isFinite(vdrop)?vdrop.toFixed(2):'—')}% VD`;
+    } else if(ins.checkVD){
+      note = (isFinite(vdrop) && vdrop<=3)
+        ? `Auto-sized to AL ${main} · ${vdrop.toFixed(2)}% VD (≤3%)`
+        : `Auto-size reached AL ${main} · ~${isFinite(vdrop)?vdrop.toFixed(2):'—'}% (>3%)`;
+    } else {
+      note = `Selected AL ${main} · ~${isFinite(vdrop)?vdrop.toFixed(2):'—'}% VD`;
+    }
+
+    const cond_diam = (main==="4/0")?3:4;
+    const base_conduit_price = pricePerFtFor(ins.method, cond_diam);
+
+    const items=[]; const add=(d,q,u,p)=>items.push({d,q,u,p,ext:q*p});
+
+    if(ins.method==='direct_bury_conduit' || ins.method==='bore'){
+      add(labelFor(ins.method, cond_diam),ins.L,"ft",base_conduit_price);
+      add("Long-sweep 90°",ins.sweeps,"ea",mats.sweeps_each);
+      add("Couplings",Math.max(0,Math.ceil(ins.L/10)-1),"ea",mats.couplings_each);
+      add("Primer & cement",1,"lump",mats.primer_and_cement_lump);
+      if(ins.lbs>0) add("LB fittings",ins.lbs,"ea",mats.lb_fitting_each);
+    } else {
+      if(ins.lbs>0) add("LB fittings (stub-ups)",ins.lbs,"ea",mats.lb_fitting_each);
+    }
+
+    if(ins.method!=='bore' && ins.cross>0){
+      const pvc_price = (cond_diam===3 ? mats.conduit_3_in_per_ft : mats.conduit_4_in_per_ft);
+      add(`${cond_diam}" PVC conduit (asphalt/concrete crossing sleeve)`, ins.cross, "ft", pvc_price);
+      add("Sawcut & surface restoration (asphalt)", ins.cross, "ft", tr.sawcut_and_restore_per_ft);
+    } else if(ins.method==='bore' && ins.cross>0){
+      add("Sawcut & surface restoration (asphalt)", ins.cross, "ft", tr.sawcut_and_restore_per_ft);
+    }
+
+    const keyAL=(s)=>`wire_al_${(s==='350' || s==='500')?s:(s.replace('/','_'))}_per_ft`;
+    add((main==='4/0')?'Service Conductor 4/0 Triplex':'Service Conductor '+main+'mcm Triplex', ins.L, "ft", mats[keyAL(main)]);
+    add("Pull string",ins.L,"ft",mats.pull_string_per_ft);
+    add("Misc hardware/fasteners",1,"lump",mats.misc_hardware_lump);
+
+    if(ins.method==='bore'){
+      add('Directional boring (subcontract)', ins.L, 'ft', mats.bore_per_ft);
+      add('Bore mobilization',1,'lump',mats.bore_mobilization_lump);
+    }
+
+    if(ins.pedestal==='ped_conn'){
+      add('Pedestal & connections',1,'lump',acc.pedestal_and_connections_lump);
+    } else if(ins.pedestal==='conn_only'){
+      add('Connections only (to existing pedestal)',1,'lump',acc.pedestal_connections_only_lump);
+    }
+    if(ins.pole==='35_5'){
+      add('Pole 35′ 5″',1,'lump',acc.pole_35_5_lump);
+    } else if(ins.pole==='40_4'){
+      add('Pole 40′ 4″',1,'lump',acc.pole_40_4_lump);
+    }
+
+    if(!!v('secondary_required')?.checked){
+      const sim=(v('secondary_install_method')?.value||'');
+      const sL=num(v('secondary_trench_length_ft')?.value)||0;
+      const sSize=(v('secondary_size')?.value||'4/0AL');
+      const sDiam = (sSize==='4/0AL') ? 3 : 4;
+      const sPriceFt = pricePerFtBySizeAndMethod(sDiam, sim==='bore'?'bore':(sim||'direct_bury_conduit'));
+      if(sim==='direct_bury_conduit' || sim==='bore'){
+        add(labelFor(sim, sDiam), sL, 'ft', sPriceFt);
+        add('Long-sweep 90° (secondary)', Math.max(0, Math.ceil(sL/100)), 'ea', mats.sweeps_each);
+        add('Couplings (secondary)', Math.max(0,Math.ceil(sL/10)-1), 'ea', mats.couplings_each);
+        add('Primer & cement (secondary)', 1, 'lump', mats.primer_and_cement_lump);
+      }
+      const keyALsec = (sSize=='350mcm')?'wire_al_350_per_ft':((sSize=='500mcm')?'wire_al_500_per_ft':'wire_al_4_0_per_ft');
+      if(sSize==='4/0AL'){
+        add('Secondary conductor 4/0 AL Triplex', sL, 'ft', mats.wire_al_4_0_per_ft);
+      }else if(sSize==='350mcm'){
+        add('Secondary conductor 350 mcm Triplex', sL, 'ft', mats.wire_al_350_per_ft);
+      }else if(sSize==='500mcm'){
+        add('Secondary conductor 500 mcm Triplex', sL, 'ft', mats.wire_al_500_per_ft);
+      }else{
+        add(`Secondary conductor ${sSize.replace('AL',' AL')} (3 conductors)`, sL*3, 'ft', mats[keyALsec]);
+      }
+      add('Pull string (secondary)', sL, 'ft', mats.pull_string_per_ft);
+
+      const ctype=(v('secondary_connection_type')?.value||'riser_3');
+      if(ctype==='riser_3') add('3" Riser (secondary)',1,'lump',acc.riser_3_lump);
+      else if(ctype==='riser_4') add('4" Riser (secondary)',1,'lump',acc.riser_4_lump);
+      else if(ctype==='xfmr_conns') add('Transformer connections (secondary)',1,'lump',acc.xfmr_connections_lump);
+
+      const lRows=[];
+      if(sim==='bore'){
+        lRows.push({d:'Labor – Wire pull (secondary)', q:(sL/lab.wire_pull_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+      }else if(sim==='direct_bury_conduit'){
+        lRows.push({d:'Labor – Trenching/excavation (secondary)', q:(sL/lab.trenching_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+        lRows.push({d:'Labor – Conduit install (secondary)', q:(sL/lab.conduit_install_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+        lRows.push({d:'Labor – Wire pull (secondary)', q:(sL/lab.wire_pull_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+        lRows.push({d:'Labor – Backfill/compaction (secondary)', q:(sL/lab.backfill_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+      }else if(sim==='direct_bury'){
+        lRows.push({d:'Labor – Trenching/excavation (secondary)', q:(sL/lab.trenching_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+        lRows.push({d:'Labor – Wire pull (secondary)', q:(sL/lab.wire_pull_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+        lRows.push({d:'Labor – Backfill/compaction (secondary)', q:(sL/lab.backfill_ft_per_hour)*(tr.soil_factor[ins.soil]||1), u:'hrs', p:lab.rate_per_hour});
+      }
+      lRows.forEach(r=>{ r.ext=r.q*r.p; items.push(r); });
+
+      if(sim==='bore'){
+        add('Directional boring (secondary)', sL, 'ft', mats.bore_per_ft);
+        add('Bore mobilization (secondary)', 1, 'lump', mats.bore_mobilization_lump);
+      }
+    }
+
+    if(ins.primary_req){
+      const pim=ins.primary_method;
+      const pL = ins.primary_len||ins.L;
+
+      if(pim==='direct_bury_conduit' || pim==='bore'){
+        const dInt=2;
+        const ppf=pricePerFtBySizeAndMethod(dInt, pim==='bore'?'bore':'direct_bury_conduit');
+        add((pim==='bore' ? `${dInt}" HDPE (primary)` : `${dInt}" PVC Sch 40 (primary)`), pL, 'ft', ppf);
+        if(pim==='bore'){
+          add('Directional boring (primary)', pL, 'ft', mats.bore_per_ft);
+          add('Bore mobilization (primary)',1,'lump',mats.bore_mobilization_lump);
+        }
+      }
+      add(`Primary conductor AL #2 (per conductor)`, pL, 'ft', COSTS.materials.wire_al_2_per_ft);
+
+      const ug=ins.primary_ug_xfmr;
+      if(ug!=='na'){
+        const mapUG={
+          "25": ["Underground transformer – 25 kVA", acc.ug_xfmr_25kva_lump],
+          "50": ["Underground transformer – 50 kVA", acc.ug_xfmr_50kva_lump],
+          "75": ["Underground transformer – 75 kVA", acc.ug_xfmr_75kva_lump],
+          "100": ["Underground transformer – 100 kVA", acc.ug_xfmr_100kva_lump],
+          "167": ["Underground transformer – 167 kVA", acc.ug_xfmr_167kva_lump]
+        };
+        const rowUG = mapUG[ug];
+        if(rowUG){ add(rowUG[0], 1, 'lump', rowUG[1]); }
+      }
+
+      const oh=ins.primary_oh_xfmr;
+      if(oh!=='na'){
+        const mapOH={
+          "25": ["Overhead transformer – 25 kVA", acc.oh_xfmr_25kva_lump],
+          "37_5": ["Overhead transformer – 37.5 kVA", acc.oh_xfmr_37_5kva_lump],
+          "50": ["Overhead transformer – 50 kVA", acc.oh_xfmr_50kva_lump],
+          "75": ["Overhead transformer – 75 kVA", acc.oh_xfmr_75kva_lump],
+          "100": ["Overhead transformer – 100 kVA", acc.oh_xfmr_100kva_lump],
+          "167": ["Overhead transformer – 167 kVA", acc.oh_xfmr_167kva_lump]
+        };
+        const rowOH = mapOH[oh];
+        if(rowOH){ add(rowOH[0], 1, 'lump', rowOH[1]); }
+      }
+
+      const laborRows=[];
+      if(pim==='bore'){
+        laborRows.push({d:"Labor – Wire pull (primary)", q:(pL/lab.wire_pull_ft_per_hour)* (tr.soil_factor[ins.soil]||1), u:"hrs", p:lab.rate_per_hour});
+      }else if(pim==='direct_bury_conduit'){
+        laborRows.push({d:"Labor – Trenching/excavation (primary)",q:(pL/lab.trenching_ft_per_hour)* (tr.soil_factor[ins.soil]||1),u:"hrs",p:lab.rate_per_hour});
+        laborRows.push({d:"Labor – Conduit install (primary)",q:(pL/lab.conduit_install_ft_per_hour)* (tr.soil_factor[ins.soil]||1),u:"hrs",p:lab.rate_per_hour});
+        laborRows.push({d:"Labor – Wire pull (primary)",q:(pL/lab.wire_pull_ft_per_hour)* (tr.soil_factor[ins.soil]||1),u:"hrs",p:lab.rate_per_hour});
+        laborRows.push({d:"Labor – Backfill/compaction (primary)",q:(pL/lab.backfill_ft_per_hour)* (tr.soil_factor[ins.soil]||1),u:"hrs",p:lab.rate_per_hour});
+      }else if(pim==='direct_bury'){
+        laborRows.push({d:"Labor – Trenching/excavation (primary)",q:(pL/lab.trenching_ft_per_hour)* (tr.soil_factor[ins.soil]||1),u:"hrs",p:lab.rate_per_hour});
+        laborRows.push({d:"Labor – Wire pull (primary)",q:(pL/lab.wire_pull_ft_per_hour)* (tr.soil_factor[ins.soil]||1),u:"hrs",p:lab.rate_per_hour});
+        laborRows.push({d:"Labor – Backfill/compaction (primary)",q:(pL/lab.backfill_ft_per_hour)* (tr.soil_factor[ins.soil]||1),u:"hrs",p:lab.rate_per_hour});
+      }
+      laborRows.forEach(r=>{ r.ext=r.q*r.p; items.push(r); });
+    }
+
+    const sFactor2= tr.soil_factor[ins.soil]||1;
+    const serviceLabor=[];
+    if(ins.method==="bore"){
+      serviceLabor.push(["Wire pull",(ins.L/lab.wire_pull_ft_per_hour)*sFactor2]);
+    } else {
+      serviceLabor.push(["Trenching/excavation",(ins.L/lab.trenching_ft_per_hour)*sFactor2]);
+      if(ins.method==="direct_bury_conduit") serviceLabor.push(["Conduit install",(ins.L/lab.conduit_install_ft_per_hour)*sFactor2]);
+      serviceLabor.push(["Wire pull",(ins.L/lab.wire_pull_ft_per_hour)*sFactor2]);
+      serviceLabor.push(["Backfill/compaction",(ins.L/lab.backfill_ft_per_hour)*sFactor2]);
+    }
+    serviceLabor.push(["Terminations/labeling",lab.terminate_hours]);
+    const laborRows2 = serviceLabor.map(([d,h])=>({d:`Labor – ${d}`,q:h,u:"hrs",p:lab.rate_per_hour,ext:h*lab.rate_per_hour}));
+
+    const matTotal=[...items].filter(r=>!String(r.d).startsWith("Labor –") && !String(r.d).startsWith("Design") && !String(r.d).startsWith("Contingency")).reduce((s,x)=>s+x.ext,0);
+    const labFromItems=[...items].filter(r=>String(r.d).startsWith("Labor –")).reduce((s,x)=>s+x.ext,0);
+    const labTotal=labFromItems + laborRows2.reduce((s,x)=>s+x.ext,0);
+    const softs=[{d:"Design/admin allowance",q:1,u:"lump",p:soft.design_admin_allowance,ext:soft.design_admin_allowance}];
+    const softTotal=softs.reduce((s,x)=>s+x.ext,0);
+    const subtotal=matTotal+labTotal+softTotal; const cont=subtotal*(soft.contingency_pct);
+    const grand=subtotal+cont;
+
+    let credit=0, net=grand;
+    if(ins.applyRC){
+      if(ins.rcBasis==='kw'){
+        const kw = (ins.volts*ins.I)/1000;
+        credit = Math.max(0, ins.rcMonths * ins.rcRate * kw);
+      } else {
+        const multMap = COSTS.revenue_credit.heating_multipliers || {};
+        const mult = (ins.heat==='aohp')? (multMap.aohp||1)
+                   : (ins.heat==='ashp_geo')? (multMap.ashp_geo||1)
+                   : (ins.heat==='ets_resistance')? (multMap.ets_resistance||1)
+                   : (multMap.non_electric||0.1);
+        credit = Math.max(0, ins.rcMonths * ins.rcRate * (ins.sqft||0) * mult);
+      }
+      net = Math.max(0, grand - credit);
+    }
+
+    document.getElementById('matTotal').textContent=fmt(matTotal);
+    document.getElementById('labTotal').textContent=fmt(labTotal);
+    document.getElementById('softTotal').textContent=fmt(softTotal);
+    document.getElementById('grandTotal').textContent=fmt(grand);
+
+    const rcard=document.getElementById('rcard');
+    const rcNote=document.getElementById('rc_formula_note');
+    const kwCap=document.getElementById('kw_caption');
+    if(rcard){ rcard.style.display = ins.applyRC ? 'block' : 'none'; }
+    if(kwCap){ kwCap.style.display = 'none'; kwCap.textContent = ''; }
+    if(rcNote){
+      if(!ins.applyRC){ rcNote.textContent=''; }
+      else if(ins.rcBasis==='kw'){
+        const kw = (ins.volts*ins.I)/1000;
+        rcNote.textContent = `(${ins.rcMonths} mo × ${ins.rcRate.toFixed(3)} $/kW/mo × ${kw.toFixed(2)} kW)`;
+        kwCap.style.display='block'; kwCap.textContent=`kW = (${ins.volts} × ${ins.I}) / 1000 = ${kw.toFixed(2)} kW`;
+      } else {
+        const labels={aohp:'AOHP', ashp_geo:'ASHP/Geothermal', ets_resistance:'ETS/Resistance', non_electric:'Non-Electric'};
+        const mult = COSTS.revenue_credit.heating_multipliers[ins.heat] || 1;
+        rcNote.textContent = `(${ins.rcMonths} mo × ${ins.rcRate.toFixed(3)} $/sqft/mo × ${ins.sqft} sqft × ${labels[ins.heat]} mult ${mult.toFixed(2)})`;
+      }
+    }
+    if(ins.applyRC){
+      document.getElementById('revCredit').textContent = "–"+fmt(credit).replace("$","$");
+      document.getElementById('netTotal').textContent = fmt(net);
+    }
+
+    const vdEl=document.getElementById('vdNote');
+    const soilTxt = `'${ins.soil}' x${(tr.soil_factor[ins.soil]||1).toFixed(2)}`;
+    vdEl.textContent = `• ${note}  • Soil ${soilTxt}  • Depth ${ins.depth}"  • Method ${ins.method.replace(/_/g," ")}  ${(ins.method!=="direct_bury")? ("• Conduit "+((main==="4/0")?'3"':'4"')) : "" }  • Voltage ${ins.volts} V  • Diversified ${ins.I} A` + (ins.applyRC? `  • RC basis ${ins.rcBasis}` : '');
+    vdEl.className="note "+((ins.checkVD && isFinite(vdrop) && vdrop>3 && !forced)? "warnc":"good");
+
+    const tbody=document.querySelector("#itemsTable tbody"); tbody.innerHTML="";
+    [...items,...laborRows2,...softs,{d:`Contingency (${(soft.contingency_pct*100).toFixed(0)}%)`,q:1,u:"lump",p:cont,ext:cont}].forEach(r=>{
+      const tr=document.createElement("tr");
+      tr.innerHTML=`<td>${r.d}</td><td>${Number(r.q).toFixed(2)}</td><td>${r.u}</td><td>${fmt(r.p)}</td><td>${fmt(r.ext)}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  const liveIds = [
+    'service_amperes','service_voltage','diversified_load_amps','trench_length_ft','install_method',
+    'soil_condition','main_size_override','do_voltage_drop_check','enforce_vd','asphalt_crossing_ft',
+    'num_sweeps','num_lb_fittings','apply_rc','home_sqft','p_rc_basis','p_rc_months','p_rc_rate','heating_type',
+    'pedestal_option','pole_option',
+    'primary_required','primary_install_method','primary_trench_length_ft','primary_ug_xfmr','primary_oh_xfmr','secondary_required','secondary_install_method','secondary_trench_length_ft','secondary_size','secondary_connection_type'
+  ];
+  liveIds.forEach(id=>{
+    const el=document.getElementById(id);
+    if(el){ el.addEventListener('input',()=>{ if(id.startsWith('p_')) applyPrices(); updateSqftVisibility(); updateRcRateLabel(); estimate(); }, {passive:true}); }
+  });
+
+  const bind=(id,ev,fn)=>safeBind(id,ev,fn);
+  bind('estimateBtn','click',()=>{applyPrices();updateSqftVisibility();updateRcRateLabel();estimate();});
+  bind('resetBtn','click',()=>{
+    document.getElementById('service_amperes').value='200';
+    document.getElementById('service_voltage').value='240';
+    document.getElementById('install_method').value='direct_bury_conduit';
+    document.getElementById('soil_condition').value='normal';
+    document.getElementById('main_size_override').value='AUTO';
+    document.getElementById('do_voltage_drop_check').checked=true;
+    document.getElementById('enforce_vd').checked=false;
+    ['trench_length_ft','burial_depth_in','asphalt_crossing_ft','num_sweeps','num_lb_fittings','diversified_load_amps','home_sqft'].forEach((id,i)=>{
+      const arr=[100,30,0,2,1,100,2000]; document.getElementById(id).value=arr[i];
+    });
+    document.getElementById('apply_rc').checked=false;
+    document.getElementById('sqft_block').style.display='none';
+    document.getElementById('heat_block').style.display='none';
+    document.getElementById('heating_type').value='aohp';
+    document.getElementById('pedestal_option').value='nr';
+    document.getElementById('pole_option').value='nr';
+    const pr=document.getElementById('primary_required'); pr.checked=false;
+    const sr=document.getElementById('secondary_required'); if(sr) sr.checked=false;
+    const pf=document.getElementById('primary_form'); pf.style.display='none';
+    const sf=document.getElementById('secondary_form'); if(sf) sf.style.display='none';
+    document.getElementById('primary_install_method').value='';
+    document.getElementById('secondary_install_method').value='';
+    document.getElementById('primary_trench_length_ft').value='100';
+    document.getElementById('secondary_trench_length_ft').value='100';
+    document.getElementById('secondary_size').value='4/0AL';
+    document.getElementById('secondary_connection_type').value='riser_3';
+    document.getElementById('primary_ug_xfmr').value='na';
+    document.getElementById('primary_oh_xfmr').value='na';
+    updateRcRateLabel();
+    estimate();
+  });
+  bind('saveBtn','click',()=>{
+    const ids=['service_amperes','service_voltage','trench_length_ft','burial_depth_in','soil_condition','num_sweeps','num_lb_fittings','asphalt_crossing_ft','diversified_load_amps','home_sqft','apply_rc','install_method','pedestal_option','pole_option','primary_required','primary_install_method','primary_trench_length_ft','primary_ug_xfmr','primary_oh_xfmr','secondary_required','secondary_install_method','secondary_trench_length_ft','secondary_size','secondary_connection_type','do_voltage_drop_check','enforce_vd','heating_type','p_rc_basis','p_rc_months','p_rc_rate'];
+    const data={}; ids.forEach(id=>{ const el=document.getElementById(id); if(!el) return; data[id]=(el?.type==='checkbox')?el.checked:el?.value;});
+    localStorage.setItem('ug_inputs_v7_6_38', JSON.stringify(data));
+  });
+  bind('loadBtn','click',()=>{
+    const raw=localStorage.getItem('ug_inputs_v7_6_38'); if(!raw) return;
+    const data=JSON.parse(raw); Object.entries(data).forEach(([id,val])=>{ const el=document.getElementById(id); if(!el) return; if(el.type==='checkbox') el.checked=!!val; else el.value=val; });
+    const cb=document.getElementById('primary_required'); const pf=document.getElementById('primary_form'); if(cb&&pf){ pf.style.display = cb.checked ? 'block' : 'none'; }
+    const cb2=document.getElementById('secondary_required'); const sf=document.getElementById('secondary_form'); if(cb2&&sf){ sf.style.display = cb2.checked ? 'block' : 'none'; }
+    updateSqftVisibility();
+    updateRcRateLabel();
+    estimate();
+  });
+  bind('printBtn','click',()=>window.print());
+  bind('updatePricingBtn','click',()=>{
+    const url=(document.getElementById('csv_url')?.value||'').trim();
+    const s=document.getElementById('csv_status');
+    if(!/^https?:\/\//i.test(url)){ s.textContent='Enter a valid https:// URL'; s.className='note err'; return; }
+    fetch(url,{mode:'cors'}).then(r=>r.ok?r.text():Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(text=>{
+        const lines=text.split(/\r?\n/).filter(l=>l.trim().length>0);
+        let updated=0; lines.forEach((line,i)=>{
+          if(i===0 && /key[,;]/i.test(lines[0])) return;
+          const parts=line.split(/,|;|\t/); if(parts.length<2) return;
+          const key=parts[0].trim(); const val=parseFloat(parts[1]);
+          if(!key || !isFinite(val)) return;
+          const path=key.split('.'); let cur=COSTS; for(let j<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>UG Service Estimator – iPad (v7.6.53)</title>
+
+<!-- PWA Meta Tags -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="UG Estimator">
+<meta name="apple-touch-fullscreen" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+
+<!-- Icons for iOS/Android -->
+<link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="512x512" href="icon-512.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+
+<!-- Manifest -->
+<link rel="manifest" href="manifest.json">
+
+<!-- Theme color -->
+<meta name="theme-color" content="#5aa2ff">
+<meta name="msapplication-TileColor" content="#0b1220">
+
+<style>
+  :root{--bg:#0b1220;--card:#121a2b;--ink:#e8eefc;--muted:#9fb0d6;--accent:#5aa2ff;--accent2:#80e0ff;--ok:#38c172;--warn:#ffb020;--err:#ff5a6a;--ctl-h:56px;--label-h:16px}
+  *{box-sizing:border-box}html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:1000px;margin:0 auto;padding:max(env(safe-area-inset-top),18px) 14px 90px}
+  h1{margin:0 0 10px;font-size:22px}
+  .badge{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.2)}
+  .grid{display:grid;gap:12px}
+  @media(min-width:820px){.grid{grid-template-columns:1.15fr .85fr}}
+  .card{background:var(--card);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px;margin-top:6px}
+  .row{display:grid;gap:10px;margin-top:8px}
+  .row.cols-2{grid-template-columns:1fr 1fr}
+  .row.cols-3{grid-template-columns:1fr 1fr 1fr}
+  .ctl{display:flex;flex-direction:column}
+  .ctl label{display:block;color:var(--muted);font-size:13px;min-height:var(--label-h);line-height:var(--label-h);margin:0 0 4px}
+  .ctl input,.ctl select{width:100%;height:var(--ctl-h);min-height:var(--ctl-h);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:#0d1424;color:#e8eefc;font-size:16px}
+  .tog{display:flex;align-items:center;gap:10px;height:calc(var(--ctl-h) + var(--label-h) + 4px)}
+  .tog label{margin:0;color:var(--muted);font-size:13px}
+  .prices-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:8px;text-align:right;border-bottom:1px dashed rgba(255,255,255,.08)}
+  th:first-child,td:first-child{text-align:left}
+  .kpi{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:6px}
+  .kpi>div{background:#0d1424;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px}
+  .kpi .val{font-weight:800;font-size:20px}
+  .note{font-size:13px;color:var(--muted);margin-top:6px}
+  .good{color:var(--ok)} .warnc{color:var(--warn)} .err{color:var(--err)}
+  footer{position:fixed;left:0;right:0;bottom:0;background:rgba(11,18,32,.85);backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,.06);padding:8px;display:flex;gap:8px;justify-content:center}
+  footer button{min-width:150px}
+  #hint{display:none;margin:6px 0;padding:8px;border-radius:10px;background:#271a00;color:#ffd56a;border:1px solid #5b3c00}
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .actions button{min-width:140px}
+  button{cursor:pointer;border:0;padding:10px 12px;border-radius:10px;font-weight:700;color:#001;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  button.secondary{background:#0d1424;color:#e8eefc;border:1px solid rgba(255,255,255,.12)}
+  button.warn{background:linear-gradient(135deg,var(--warn),#ffd56a);color:#2a1a00}
+  .rcard{background:#0e1a34;border:1px solid rgba(128,200,255,.25);border-radius:10px;padding:8px;margin-top:8px}
+  .ac-row{align-items:end}
+  
+  /* PWA Install Banner */
+  .install-banner{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#001;padding:8px 12px;border-radius:10px;margin:6px 0;display:none;align-items:center;justify-content:space-between}
+  .install-banner button{background:rgba(0,0,0,.1);color:#001;border:1px solid rgba(0,0,0,.2);padding:4px 8px;font-size:12px;min-width:auto}
+  
+  @media print{footer{display:none}.install-banner{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Underground Electrical Service – Estimator <span id="hb" class="badge">Loaded…</span></h1>
+  <div id="hint" style="display:none;">If buttons do nothing, you're in a preview that blocks JavaScript. Tap Share → <b>Open in Microsoft Edge</b>. Then Share → <b>Add to Home Screen</b> for offline use.</div>
+  
+  <!-- PWA Install Banner -->
+  <div id="installBanner" class="install-banner">
+    <span>📱 Install this app for quick access</span>
+    <button id="installBtn">Install</button>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <!-- Row 1 -->
+      <div class="row cols-3">
+        <div class="ctl">
+          <label>Service Amps</label>
+          <select id="service_amperes">
+            <option value="200" selected>200 A</option>
+            <option value="320">320 A</option>
+            <option value="600">600 A</option>
+          </select>
+        </div>
+        <div class="ctl">
+          <label>Voltage</label>
+          <select id="service_voltage">
+            <option value="240" selected>240</option>
+            <option value="480">480</option>
+          </select>
+        </div>
+        <div class="ctl"><label>Diversified Load (A)</label><input id="diversified_load_amps" type="number" value="100"></div>
+      </div>
+
+      <!-- Row 2 -->
+      <div class="row cols-2">
+        <div class="ctl">
+          <label>Install Method</label>
+          <select id="install_method">
+            <option value="direct_bury">Direct Bury</option>
+            <option value="direct_bury_conduit" selected>Direct Bury w/ Conduit</option>
+            <option value="bore">Bore</option>
+          </select>
+        </div>
+        <div class="ctl"><label>Service Trench Length (ft)</label><input id="trench_length_ft" type="number" value="100"></div>
+      </div>
+
+      <!-- Row 3 -->
+      <div class="row cols-2">
+        <div class="ctl">
+          <label>Main size override (Aluminum)</label>
+          <select id="main_size_override">
+            <option value="AUTO" selected>Auto (VD)</option>
+            <option value="4/0">4/0</option>
+            <option value="350">350 kcmil</option>
+            <option value="500">500 kcmil</option>
+          </select>
+        </div>
+        <div class="row cols-2" style="gap:10px">
+          <div class="tog"><input id="do_voltage_drop_check" type="checkbox" checked><label for="do_voltage_drop_check">Check VD</label></div>
+          <div class="tog"><input id="enforce_vd" type="checkbox"><label for="enforce_vd">Enforce ≤3%</label></div>
+        </div>
+      </div>
+
+      <!-- Row 4 -->
+      <div class="row cols-2">
+        <div class="ctl">
+          <label>Soil</label>
+          <select id="soil_condition">
+            <option>normal</option><option>clay</option><option>sand</option><option>rocky</option>
+          </select>
+        </div>
+        <div class="ctl"><label>Burial Depth (in)</label><input id="burial_depth_in" type="number" value="30"></div>
+      </div>
+
+      <!-- Row 5: aligned three-wide -->
+      <div class="row cols-3 ac-row">
+        <div class="ctl"><label>Asphalt/Concrete crossing (ft)</label><input id="asphalt_crossing_ft" type="number" value="0"></div>
+        <div class="ctl"><label>Long-sweep 90s</label><input id="num_sweeps" type="number" value="2"></div>
+        <div class="ctl"><label>LB fittings</label><input id="num_lb_fittings" type="number" value="1"></div>
+      </div>
+
+      <!-- Row 6: Rev Credit toggle + heating + sqft -->
+      <div class="row cols-3">
+        <div class="tog"><input id="apply_rc" type="checkbox"><label for="apply_rc">Apply Revenue Credit</label></div>
+        <div id="heat_block" class="ctl" style="display:none">
+          <label>Heating Type</label>
+          <select id="heating_type">
+            <option value="aohp" selected>AOHP</option>
+            <option value="ashp_geo">ASHP/Geothermal</option>
+            <option value="ets_resistance">ETS/Resistance</option>
+            <option value="non_electric">Non-Electric Heat</option>
+          </select>
+        </div>
+        <div id="sqft_block" class="ctl" style="display:none"><label>Home Sq Ft</label><input id="home_sqft" type="number" value="2000"></div>
+      </div>
+
+      <!-- Row 7: Pole + Pedestal -->
+      <div class="row cols-2">
+        <div class="ctl">
+          <label>Pole</label>
+          <select id="pole_option">
+            <option value="nr" selected>Not Required</option>
+            <option value="35_5">35′ 5″</option>
+            <option value="40_4">40′ 4″</option>
+          </select>
+        </div>
+        <div class="ctl">
+          <label>Pedestal</label>
+          <select id="pedestal_option">
+            <option value="nr" selected>Not Required</option>
+            <option value="ped_conn">Pedestal &amp; Connections</option>
+            <option value="conn_only">Connections Only</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Primary + Secondary toggles in same row -->
+      <div class="row cols-2" style="align-items:end">
+        <div class="tog">
+          <input id="primary_required" type="checkbox" onchange="document.getElementById('primary_form').style.display=this.checked?'block':'none'">
+          <label for="primary_required">Primary Required</label>
+        </div>
+        <div class="tog">
+          <input id="secondary_required" type="checkbox" onchange="document.getElementById('secondary_form').style.display=this.checked?'block':'none'">
+          <label for="secondary_required">Secondary Required</label>
+        </div>
+      </div>
+
+      <!-- Primary form -->
+      <div id="primary_form" class="card" style="display:none">
+        <!-- Row A: Install Method + Trench Length -->
+        <div class="row cols-2">
+          <div class="ctl">
+            <label>Primary Install Method</label>
+            <select id="primary_install_method">
+              <option value="" selected>Select…</option>
+              <option value="direct_bury">Direct Bury</option>
+              <option value="direct_bury_conduit">Direct Bury w/ Conduit</option>
+              <option value="bore">Bore</option>
+            </select>
+          </div>
+          <div class="ctl">
+            <label>Primary Trench Length (ft)</label>
+            <input id="primary_trench_length_ft" type="number" value="100">
+          </div>
+        </div>
+        <!-- Row B: UG + OH Transformer -->
+        <div class="row cols-2">
+          <div class="ctl">
+            <label>UG Transformer</label>
+            <select id="primary_ug_xfmr">
+              <option value="na" selected>N/A</option>
+              <option value="25">25 kVA</option>
+              <option value="50">50 kVA</option>
+              <option value="75">75 kVA</option>
+              <option value="100">100 kVA</option>
+              <option value="167">167 kVA</option>
+            </select>
+          </div>
+          <div class="ctl">
+            <label>OH Transformer</label>
+            <select id="primary_oh_xfmr">
+              <option value="na" selected>N/A</option>
+              <option value="25">25 kVA</option>
+              <option value="37_5">37.5 kVA</option>
+              <option value="50">50 kVA</option>
+              <option value="75">75 kVA</option>
+              <option value="100">100 kVA</option>
+              <option value="167">167 kVA</option>
+            </select>
+          </div>
+        </div>
+        <div class="note">Primary conductor fixed to <b>#2 AL</b>; when conduit used, size is <b>2"</b>.</div>
+      </div>
+      <!-- Secondary form -->
+      <div id="secondary_form" class="card" style="display:none">
+        <!-- Row A: Install Method + Trench Length -->
+        <div class="row cols-2">
+          <div class="ctl">
+            <label>Secondary Install Method</label>
+            <select id="secondary_install_method">
+              <option value="" selected>Select…</option>
+              <option value="direct_bury">Direct Bury</option>
+              <option value="direct_bury_conduit">Direct Bury w/ Conduit</option>
+              <option value="bore">Bore</option>
+            </select>
+          </div>
+          <div class="ctl">
+            <label>Secondary Trench Length (ft)</label>
+            <input id="secondary_trench_length_ft" type="number" value="100">
+          </div>
+        </div>
+        <!-- Row B: Secondary Size + Connection Type -->
+        <div class="row cols-2">
+          <div class="ctl">
+            <label>Secondary Size</label>
+            <select id="secondary_size">
+              <option value="4/0AL" selected>4/0 AL</option>
+              <option value="350mcm">350 mcm</option>
+              <option value="500mcm">500 mcm</option>
+            </select>
+          </div>
+          <div class="ctl">
+            <label>Connection Type</label>
+            <select id="secondary_connection_type">
+              <option value="riser_3">3" Riser</option>
+              <option value="riser_4">4" Riser</option>
+              <option value="xfmr_conns">Transformer Connections</option>
+            </select>
+          </div>
+        </div>
+        <div class="note">Secondary conduit size auto: 3" for 4/0 AL; 4" for 350/500 mcm.</div>
+      </div>
+
+      <details class="card" style="margin-top:10px;">
+        <summary>Edit Prices & Import <span class="pill">saved on device</span></summary>
+        <div class="prices-grid">
+          <div style="grid-column:1 / -1" class="ctl">
+            <label>CSV URL (https://…)</label>
+            <input id="csv_url" placeholder="https://example.com/ug_pricing.csv">
+            <div id="csv_status" class="note"></div>
+            <div class="actions" style="margin:6px 0 2px">
+              <button type="button" class="secondary" id="updatePricingBtn">Update Pricing from CSV</button>
+            </div>
+          </div>
+
+          <!-- PVC -->
+          <div class="ctl"><label>PVC 2" ($/ft)</label><input id="p_conduit_2" type="number" step="0.01"></div>
+          <div class="ctl"><label>PVC 3" ($/ft)</label><input id="p_conduit_3" type="number" step="0.01"></div>
+          <div class="ctl"><label>PVC 4" ($/ft)</label><input id="p_conduit_4" type="number" step="0.01"></div>
+          <!-- HDPE -->
+          <div class="ctl"><label>HDPE 2" ($/ft)</label><input id="p_hdpe_2" type="number" step="0.01"></div>
+          <div class="ctl"><label>HDPE 3" ($/ft)</label><input id="p_hdpe_3" type="number" step="0.01"></div>
+          <div class="ctl"><label>HDPE 4" ($/ft)</label><input id="p_hdpe_4" type="number" step="0.01"></div>
+
+          <div class="ctl"><label>Sweep 90° ($/ea)</label><input id="p_sweep" type="number" step="0.01"></div>
+          <div class="ctl"><label>Coupling ($/ea)</label><input id="p_coupling" type="number" step="0.01"></div>
+          <div class="ctl"><label>Primer/Cem ($)</label><input id="p_pc" type="number" step="0.01"></div>
+
+          <div class="ctl"><label>AL #2 ($/ft)</label><input id="p_al_2" type="number" step="0.01"></div>
+          <div class="ctl"><label>AL 1/0 ($/ft)</label><input id="p_al_1_0" type="number" step="0.01"></div>
+          <div class="ctl"><label>AL 4/0 ($/ft)</label><input id="p_al_4_0" type="number" step="0.01"></div>
+          <div class="ctl"><label>AL 350 ($/ft)</label><input id="p_al_350" type="number" step="0.01"></div>
+          <div class="ctl"><label>AL 500 ($/ft)</label><input id="p_al_500" type="number" step="0.01"></div>
+
+          <div class="ctl"><label>Pull Str ($/ft)</label><input id="p_pull" type="number" step="0.01"></div>
+          <div class="ctl"><label>Misc ($)</label><input id="p_misc" type="number" step="0.01"></div>
+          <div class="ctl"><label>LB ($/ea)</label><input id="p_lb" type="number" step="0.01"></div>
+
+          <div class="ctl"><label>Restoration ($/ft)</label><input id="p_saw" type="number" step="0.01"></div>
+          <div class="ctl"><label>Bore ($/ft)</label><input id="p_boreft" type="number" step="0.01"></div>
+          <div class="ctl"><label>Bore Mob ($)</label><input id="p_boremob" type="number" step="0.01"></div>
+
+          <div class="ctl"><label>Labor ($/hr)</label><input id="p_rate" type="number" step="0.01"></div>
+          <div class="ctl"><label>Trench (ft/hr)</label><input id="p_trench_prod" type="number" step="0.01"></div>
+          <div class="ctl"><label>Backfill (ft/hr)</label><input id="p_backfill_prod" type="number" step="0.01"></div>
+          <div class="ctl"><label>Conduit (ft/hr)</label><input id="p_conduit_prod" type="number" step="0.01"></div>
+          <div class="ctl"><label>Pull (ft/hr)</label><input id="p_pull_prod" type="number" step="0.01"></div>
+          <div class="ctl"><label>Terminate (hr)</label><input id="p_terminate_hrs" type="number" step="0.01"></div>
+
+          <div class="ctl"><label>Design ($)</label><input id="p_design_admin" type="number" step="0.01"></div>
+          <div class="ctl"><label>Cont (%)</label><input id="p_cont_pct" type="number" step="0.01"></div>
+
+          <!-- Accessories -->
+          <div class="ctl"><label>Pedestal + Conn ($)</label><input id="p_ped_conn" type="number" step="0.01"></div>
+          <div class="ctl"><label>Conn Only ($)</label><input id="p_conn_only" type="number" step="0.01"></div>
+          <div class="ctl"><label>Pole 35′ ($)</label><input id="p_pole_35_5" type="number" step="0.01"></div>
+          <div class="ctl"><label>Pole 40′ ($)</label><input id="p_pole_40_4" type="number" step="0.01"></div>
+          <div class="ctl"><label>3" Riser ($)</label><input id="p_riser_3" type="number" step="0.01"></div>
+          <div class="ctl"><label>4" Riser ($)</label><input id="p_riser_4" type="number" step="0.01"></div>
+          <div class="ctl"><label>Transformer Connections ($)</label><input id="p_xfmr_conn" type="number" step="0.01"></div>
+
+
+          <!-- Transformers -->
+          <div class="ctl"><label>XFMR 25kVA UG ($)</label><input id="p_xfmr_25" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 50kVA UG ($)</label><input id="p_xfmr_50" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 75kVA UG ($)</label><input id="p_xfmr_75" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 100kVA UG ($)</label><input id="p_xfmr_100" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 167kVA UG ($)</label><input id="p_xfmr_167" type="number" step="0.01"></div>
+
+          <div class="ctl"><label>XFMR 25kVA OH ($)</label><input id="p_oh_xfmr_25" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 37.5kVA OH ($)</label><input id="p_oh_xfmr_37_5" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 50kVA OH ($)</label><input id="p_oh_xfmr_50" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 75kVA OH ($)</label><input id="p_oh_xfmr_75" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 100kVA OH ($)</label><input id="p_oh_xfmr_100" type="number" step="0.01"></div>
+          <div class="ctl"><label>XFMR 167kVA OH ($)</label><input id="p_oh_xfmr_167" type="number" step="0.01"></div>
+
+          <!-- Revenue Credit settings -->
+          <div class="ctl"><label>RC Basis</label>
+            <select id="p_rc_basis">
+              <option value="sqft" selected>Square Footage</option>
+              <option value="kw">kW (Diversified Load)</option>
+            </select>
+          </div>
+          <div class="ctl"><label>RC Months</label><input id="p_rc_months" type="number" step="1" value="30"></div>
+          <div class="ctl"><label id="p_rc_rate_label">RC $/unit/mo</label><input id="p_rc_rate" type="number" step="0.001" value="0.06"></div>
+          <div class="ctl"><label>RC Mult AOHP</label><input id="p_rc_mult_aohp" type="number" step="0.01" value="1.00"></div>
+          <div class="ctl"><label>RC Mult ASHP/Geo</label><input id="p_rc_mult_ashp_geo" type="number" step="0.01" value="0.75"></div>
+          <div class="ctl"><label>RC Mult ETS/Res</label><input id="p_rc_mult_ets" type="number" step="0.01" value="1.50"></div>
+          <div class="ctl"><label>RC Mult Non-Elec</label><input id="p_rc_mult_non" type="number" step="0.01" value="0.10"></div>
+        </div>
+        <div class="note">CSV keys example: revenue_credit.heating_multipliers.aohp, revenue_credit.heating_multipliers.ashp_geo, revenue_credit.heating_multipliers.ets_resistance, revenue_credit.heating_multipliers.non_electric …</div>
+      </details>
+
+      <div class="actions">
+        <button type="button" id="estimateBtn">Estimate</button>
+        <button type="button" class="secondary" id="resetBtn">Reset</button>
+        <button type="button" class="secondary" id="saveBtn">Save Inputs</button>
+        <button type="button" class="secondary" id="loadBtn">Load Inputs</button>
+        <button type="button" class="warn" id="printBtn">Share/Print PDF</button>
+      </div>
+      <div class="note">Planning tool only, this is not a billable estimate. Verify sizing and cost through proper design tool.</div>
+    </div>
+
+    <div class="card">
+      <div class="kpi">
+        <div><div>Materials</div><div class="val" id="matTotal">$0.00</div></div>
+        <div><div>Labor</div><div class="val" id="labTotal">$0.00</div></div>
+        <div><div>Soft</div><div class="val" id="softTotal">$0.00</div></div>
+        <div><div>Grand Total</div><div class="val" id="grandTotal">$0.00</div></div>
+      </div>
+      <div class="card rcard" id="rcard" style="display:none">
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center">
+          <div>
+            <b>Revenue Credit</b> <span class="note" id="rc_formula_note"></span>
+            <div class="note" id="kw_caption" style="margin-top:4px; display:none;"></div>
+          </div>
+          <div class="val" id="revCredit">$0.00</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:6px">
+          <div><b>Net After Revenue Credit</b></div>
+          <div class="val" id="netTotal">$0.00</div>
+        </div>
+      </div>
+      <div id="vdNote" class="note"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div>Itemized</div>
+    <table id="itemsTable"><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Unit $</th><th>Ext $</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<footer>
+  <button type="button" id="quick200">Quick 200A / 100 ft</button>
+</footer>
+
+<script>
+(function(){
+  const safeBind=(id,ev,fn)=>{const el=document.getElementById(id); if(el) el.addEventListener(ev,fn,{passive:true});};
+  const hb=document.getElementById('hb'); hb.textContent='
