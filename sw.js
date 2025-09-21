@@ -1,59 +1,32 @@
-const CACHE_NAME = 'ug-estimator-v7.6.53';
-const urlsToCache = [
-  './',
-  './ug_estimator_v7_6_53.html',
-  './manifest.json'
+const CACHE = "ug-estimator-v7-6-54";
+const ASSETS = [
+  "./",
+  "./index.html",
+  "./manifest.webmanifest",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png"
 ];
 
-// Install service worker and cache resources
-self.addEventListener('install', function(event) {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(function(cache) {
-        console.log('Opened cache');
-        return cache.addAll(urlsToCache);
-      })
-      .then(function() {
-        // Force the waiting service worker to become the active service worker
-        return self.skipWaiting();
-      })
-  );
+self.addEventListener("install", e => {
+  e.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
+  self.skipWaiting();
 });
 
-// Fetch event - serve from cache when offline
-self.addEventListener('fetch', function(event) {
-  event.respondWith(
-    caches.match(event.request)
-      .then(function(response) {
-        // Return cached version or fetch from network
-        return response || fetch(event.request);
-      })
+self.addEventListener("activate", e => {
+  e.waitUntil(
+    caches.keys().then(keys => Promise.all(keys.map(k => k !== CACHE && caches.delete(k))))
   );
+  self.clients.claim();
 });
 
-// Activate event - clean up old caches
-self.addEventListener('activate', function(event) {
-  event.waitUntil(
-    caches.keys().then(function(cacheNames) {
-      return Promise.all(
-        cacheNames.map(function(cacheName) {
-          if (cacheName !== CACHE_NAME) {
-            console.log('Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    }).then(function() {
-      // Claim clients to make the service worker immediately active
-      return self.clients.claim();
-    })
-  );
-});
-
-// Handle background sync (for future offline functionality)
-self.addEventListener('sync', function(event) {
-  if (event.tag === 'background-sync') {
-    console.log('Background sync event');
-    // Could sync saved estimates to cloud storage here
+self.addEventListener("fetch", e => {
+  const req = e.request;
+  if (req.mode === "navigate") {
+    // SPA-style navigation fallback to index
+    e.respondWith(fetch(req).catch(() => caches.match("./index.html")));
+    return;
   }
+  e.respondWith(
+    caches.match(req).then(cached => cached || fetch(req))
+  );
 });
